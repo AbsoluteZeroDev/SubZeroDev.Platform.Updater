@@ -1,8 +1,10 @@
+# Without arguments, as a pre-build step of the shared .NET workflow, it checks the run's ref.
 param(
-    [Parameter(Mandatory)][string]$Ref,
-    [Parameter(Mandatory)][string]$DefaultBranch
+    [string]$Ref = $env:GITHUB_REF,
+    [string]$DefaultBranch = $(if ($env:GITHUB_EVENT_PATH) { (Get-Content -Raw $env:GITHUB_EVENT_PATH | ConvertFrom-Json).repository.default_branch })
 )
 $ErrorActionPreference = 'Stop'
+if (-not $Ref -or -not $DefaultBranch) { throw 'Pass -Ref and -DefaultBranch outside GitHub Actions.' }
 if (-not $Ref.StartsWith('refs/tags/', [StringComparison]::Ordinal)) { throw 'Publication requires a tag ref.' }
 git check-ref-format $Ref
 if ($LASTEXITCODE) { throw 'Invalid tag ref.' }
