@@ -4,6 +4,8 @@ param(
     [string]$DefaultBranch = $(if ($env:GITHUB_EVENT_PATH) { (Get-Content -Raw $env:GITHUB_EVENT_PATH | ConvertFrom-Json).repository.default_branch })
 )
 $ErrorActionPreference = 'Stop'
+# The shared workflow's script runner turns a native command's non-zero exit into an error; this script checks $LASTEXITCODE itself.
+$PSNativeCommandUseErrorActionPreference = $false
 if (-not $Ref -or -not $DefaultBranch) { throw 'Pass -Ref and -DefaultBranch outside GitHub Actions.' }
 if (-not $Ref.StartsWith('refs/tags/', [StringComparison]::Ordinal)) { throw 'Publication requires a tag ref.' }
 git check-ref-format $Ref
