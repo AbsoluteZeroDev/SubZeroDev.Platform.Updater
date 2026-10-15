@@ -6,9 +6,12 @@ on:
 permissions: {}
 jobs:
   dotnet:
+    # GitHub checks every permission the shared workflow's jobs declare before it starts, including
+    # its publish and release jobs, which CI never runs. The jobs that do run read.
     permissions:
-      contents: read
-      packages: read
+      contents: write
+      packages: write
+      id-token: write
     uses: The-Running-Dev/GitHub-ActionTemplates/.github/workflows/dotnet.yml@v0
     with:
       os: '["windows-latest"]'
