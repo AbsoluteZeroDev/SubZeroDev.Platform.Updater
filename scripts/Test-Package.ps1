@@ -1,8 +1,12 @@
+# -NoTest skips the library tests, for CI, where the shared .NET workflow has already run them.
+param([switch]$NoTest)
 $ErrorActionPreference = 'Stop'
 & "$PSScriptRoot/Test-ReleaseTag.ps1"
 & "$PSScriptRoot/Test-PublishingGuards.ps1"
-dotnet test SubZeroDev.Platform.Updater.slnx -c Release
-if ($LASTEXITCODE) { throw 'Library tests failed.' }
+if (-not $NoTest) {
+    dotnet test SubZeroDev.Platform.Updater.slnx -c Release
+    if ($LASTEXITCODE) { throw 'Library tests failed.' }
+}
 dotnet pack src/SubZeroDev.Platform.Updater -c Release -p:ContinuousIntegrationBuild=true -o artifacts/packages
 if ($LASTEXITCODE) { throw 'NuGet pack failed.' }
 $feed = [IO.Path]::GetFullPath('artifacts/packages')
