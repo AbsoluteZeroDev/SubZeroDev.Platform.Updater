@@ -1,15 +1,15 @@
 # Windows validation — 2026-10-01
 
 Validated with .NET 10, Velopack runtime/CLI 1.2.161, Windows x64. Artifacts are unsigned.
-Local evidence is retained under ignored `artifacts/`; CI repeats deterministic and portable gates.
+Local evidence is retained under ignored `artifacts/`; CI repeats deterministic, portable, Setup, and MSI gates.
 
 | Gate | Evidence |
 |---|---|
 | Library | 32 deterministic tests: defaults/atomic storage, corrupt/locked preferences and bounded transient-lock recovery, manual override, throttling failures, cancellation/single-flight, exact-candidate consent, deferral, restart, unsupported layout, HTTP errors, feed identity, semantic channel selection, SHA-256 tampering. |
 | Real NuGet consumers | WPF and WinUI 3 restore 0.1.0 from a freshly packed feed with an empty cache; both Release builds pass. Both executables ran a manual check and reported UnsupportedInstallation, correctly identifying their unpackaged layout. |
 | Portable | Real packaged probe A=1.0.0 → B=1.0.1 → C=1.0.2, each version a separate publish, one process relaunch per update, root launcher in a path with spaces. Each run's compiled binary version must equal its package version, and the relaunched process must confirm the recorded pending install. External config/log sentinels and persisted consent survive. `scripts/Test-PortableUpdate.ps1` repeats this and runs in CI. The probe serves each version's output through a fake GitHub (release listing, redirected downloads), so the production release source runs rather than a file-source shortcut. Since 2026-10-02 every version is signed with an ephemeral publisher key whose public half the probe pins, so each update also passes package signature verification. |
-| Setup | Silent per-user Setup installed A into a path with spaces. Actual update/relaunch A→B→C succeeded; external preferences and run/state logs survived. Evidence: setup-data. Setup test installation was uninstalled before MSI testing. |
-| MSI | Per-user MSI installed A without elevation. Actual update/relaunch to B succeeded. HKCU uninstall entry MSI:SubZeroDev.UpdaterProbe reported 1.0.1 and the expected LocalAppData install location. Evidence: msi-install.log and msi-data. |
+| Setup | `scripts/Test-InstalledUpdate.ps1` runs a silent per-user Setup A→B update in a path with spaces. It verifies the relaunched binary, pinned publisher signature, preserved external data and consent, and uninstall cleanup. CI repeats this gate. The earlier manual A→B→C run is retained as local evidence under `setup-data`. |
+| MSI | The same script runs a per-user MSI A→B update without elevation and verifies the relaunched binary, pinned publisher signature, preserved data, and updated HKCU uninstall version. CI repeats this gate. Velopack 1.2.161 leaves a version-only HKCU key after `msiexec /x`; the script removes only its uniquely named smoke-test key. The earlier manual run is retained under `msi-data`. |
 | Public GitHub | Public probe v1.0.1 contains ZIP, Setup, MSI, full nupkg, feed, SHA256SUMS and notes. Packaged A checked/downloaded/verified/applied/relaunched B through the production unauthenticated GitHub source. Evidence: github-data. |
 | HotCorners | Actual packaged 1.1.0→1.1.1 local-feed update completed; `current/sq.version` became 1.1.1 and a new app process ran from the same stable root. Isolated updater preferences and preservation sentinel survived. Smoke-only build enables the local feed and isolated settings; production builds exclude those hooks. |
 | HotCorners regression | 214 tests pass: 66 Core, 74 Platform, 74 App. Includes startup migration/quoting, native menu checked/radio/busy states, and safe restart waiting for an occupied action slot. |
@@ -20,7 +20,7 @@ Public probe: https://github.com/The-Running-Dev/SubZeroDev.UpdaterProbe.Release
 
 Run `scripts/Test-Package.ps1`. Pack probe A with `scripts/Pack-Application.ps1`, AppId
 `SubZeroDev.UpdaterProbe`, MainExe `UpdaterProbe.exe`, version `1.0.0`, output `artifacts/probe`.
-Run `scripts/Test-PortableUpdate.ps1`. Use fresh output directories on each run.
+Run `scripts/Test-PortableUpdate.ps1` and `scripts/Test-InstalledUpdate.ps1`. Use fresh output directories on each run.
 
 For Setup, run its generated installer with `--silent --installto <writable-path>`; for MSI use
 `msiexec /i <generated-msi> /qn /norestart /l*v <log>`. Before launching either stable root EXE,
