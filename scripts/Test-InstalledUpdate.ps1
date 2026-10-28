@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([string]$OutputDirectory = 'artifacts/installer-smoke', [string]$NuGetConfig)
+param([string]$OutputDirectory = 'artifacts/installer-smoke', [string]$NuGetConfig, [switch]$RequireCleanMsiUninstall)
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 if (-not $IsWindows -and $PSVersionTable.PSEdition -eq 'Core') { throw 'Installer smoke requires Windows.' }
@@ -25,6 +25,29 @@ function Invoke-Installer([string]$File, [string[]]$Arguments, [string]$Descript
     if ($process.ExitCode -ne 0) { throw "$Description failed with exit code $($process.ExitCode); inspect $root" }
 }
 
+function Get-MsiProductCode([string]$Path) {
+    $installer = New-Object -ComObject WindowsInstaller.Installer
+    $database = $installer.OpenDatabase($Path, 0)
+    $view = $database.OpenView("SELECT Value FROM Property WHERE Property = 'ProductCode'")
+    $null = $view.Execute()
+    $record = $view.Fetch()
+    if ($null -eq $record) { throw "MSI has no ProductCode: $Path" }
+    return $record.StringData(1)
+}
+
+function Get-MsiInstalledVersion([string]$ProductCode) {
+    $installer = New-Object -ComObject WindowsInstaller.Installer
+    if ($installer.ProductState($ProductCode) -ne 5) { return $null }
+    return $installer.ProductInfo($ProductCode, 'VersionString')
+}
+
+function Get-ProbeShortcuts([string]$AppId) {
+    $roots = @([Environment]::GetFolderPath('StartMenu'), [Environment]::GetFolderPath('DesktopDirectory'))
+    return @($roots | Where-Object { $_ -and (Test-Path -LiteralPath $_) } |
+        ForEach-Object { Get-ChildItem -LiteralPath $_ -Recurse -File -Filter "$AppId*.lnk" -ErrorAction SilentlyContinue } |
+        Select-Object -ExpandProperty FullName -Unique)
+}
+
 function Test-InstalledUpdate([string]$Kind, [string]$Installer, [string]$SigningKey) {
     $case = Join-Path $root $Kind
     $data = Join-Path $case 'preserved data'
@@ -36,6 +59,8 @@ function Test-InstalledUpdate([string]$Kind, [string]$Installer, [string]$Signin
     $control = @{ AppId = $appId; Repository = $repo; Data = $data; Target = '1.0.0'; Feed = (Join-Path $update 'assets'); SigningKey = $SigningKey }
     $control | ConvertTo-Json | Set-Content -LiteralPath $env:UPDATER_PROBE_CONTROL
     $installed = $false
+    $productCode = if ($Kind -eq 'MSI') { Get-MsiProductCode $Installer } else { $null }
+    $msiLifecycle = if ($Kind -eq 'MSI') { [ordered]@{ ProductCode = $productCode; InitialInstallerVersion = '1.0.0'; UpdatedPackageVersion = '1.0.1' } } else { $null }
     try {
         if ($Kind -eq 'Setup') {
             Invoke-Installer $Installer @('--silent', '--installto', "`"$installation`"") 'Setup installation'
@@ -46,6 +71,11 @@ function Test-InstalledUpdate([string]$Kind, [string]$Installer, [string]$Signin
         $installed = $true
         $launcher = Join-Path $installation "$appId.exe"
         Wait-ForFile $launcher "$Kind launcher"
+        if ($Kind -eq 'MSI') {
+            $msiLifecycle.InstalledProductVersion = Get-MsiInstalledVersion $productCode
+            if ([Version]::Parse($msiLifecycle.InstalledProductVersion).ToString(3) -ne '1.0.0') { throw "Windows Installer registered $($msiLifecycle.InstalledProductVersion), expected 1.0.0." }
+            $msiLifecycle.InstalledShortcuts = @(Get-ProbeShortcuts $appId)
+        }
 
         $control.Target = '1.0.1'
         $control | ConvertTo-Json | Set-Content -LiteralPath $env:UPDATER_PROBE_CONTROL
@@ -75,6 +105,14 @@ function Test-InstalledUpdate([string]$Kind, [string]$Installer, [string]$Signin
         if ($Kind -eq 'MSI') {
             $entry = Get-ItemProperty -LiteralPath "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\MSI:$appId" -ErrorAction Stop
             if ($entry.DisplayVersion -ne '1.0.1') { throw "MSI uninstall registration has version $($entry.DisplayVersion), expected 1.0.1." }
+            $msiLifecycle.UpdatedProductVersion = Get-MsiInstalledVersion $productCode
+            $msiLifecycle.UpdatedUninstallVersion = $entry.DisplayVersion
+            $registeredVersion = [Version]::Parse($msiLifecycle.UpdatedProductVersion).ToString(3)
+            if ($registeredVersion -notin @('1.0.0', '1.0.1')) { throw "Windows Installer registered unexpected version $($msiLifecycle.UpdatedProductVersion) after update." }
+            $msiLifecycle.UpdatedShortcuts = @(Get-ProbeShortcuts $appId)
+            if ($registeredVersion -ne '1.0.1') {
+                Write-Warning "Windows Installer still registers $($msiLifecycle.UpdatedProductVersion) after the Velopack update to 1.0.1."
+            }
         }
         Write-Output "$Kind A -> B passed: $data"
     } finally {
@@ -85,13 +123,24 @@ function Test-InstalledUpdate([string]$Kind, [string]$Installer, [string]$Signin
             } else {
                 $log = Join-Path $case 'msi-uninstall.log'
                 Invoke-Installer 'msiexec.exe' @('/x', "`"$Installer`"", '/qn', '/norestart', '/l*v', "`"$log`"") 'MSI uninstall'
+                $msiLifecycle.UninstalledProductVersion = Get-MsiInstalledVersion $productCode
+                if ($null -ne $msiLifecycle.UninstalledProductVersion) { throw "MSI uninstall left Windows Installer product $productCode registered." }
                 # Velopack 1.2.161 leaves its version-only HKCU key after msiexec removes an updated MSI.
-                # This key belongs to the randomly generated smoke app, so remove it without touching other installs.
+                # Capture its exact contents before removing only this randomly generated smoke app's key.
                 $versionKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\MSI:$appId"
+                $residue = @()
                 if (Test-Path -LiteralPath $versionKey) {
-                    Write-Warning "MSI uninstall left the Velopack version key for $appId; removing the smoke-test key."
+                    $residue = @((Get-Item -LiteralPath $versionKey).GetValueNames() | Sort-Object)
+                    Write-Warning "MSI uninstall left the Velopack version key for $appId with values: $($residue -join ', '); removing the smoke-test key."
                     Remove-Item -LiteralPath $versionKey
                 }
+                $msiLifecycle.ResidualUninstallValues = $residue
+                $shortcuts = @(Get-ProbeShortcuts $appId)
+                $msiLifecycle.ResidualShortcuts = $shortcuts
+                $msiLifecycle | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $case 'msi-lifecycle.json')
+                if ($residue.Count -gt 0 -and ($residue.Count -ne 1 -or $residue[0] -ne 'DisplayVersion')) { throw "MSI uninstall left unexpected registry values: $($residue -join ', ')." }
+                if ($RequireCleanMsiUninstall -and $residue.Count -gt 0) { throw "MSI uninstall left the Velopack version key; a clean uninstall is required." }
+                if ($shortcuts.Count -gt 0) { throw "MSI uninstall left shortcuts: $($shortcuts -join ', ')." }
             }
             if (Test-Path -LiteralPath $installation) { throw "$Kind uninstall left its installation directory: $installation" }
         }
