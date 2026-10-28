@@ -104,6 +104,9 @@ These cover rollback/preservation expectations, inconsistent versions, stale obs
 or consent changes, registration loss, installer failures/reboot codes, and result persistence
 when installation and cleanup both fail. `Test-Distribution.ps1` runs them before packaging and
 runs all three installed cases through the existing Windows CI entry point.
+It also prints the repair JSON in the CI job log, including after failure; the shared workflow's
+artifact upload contains TRX results rather than installer output. Verbose MSI logs remain at
+the paths recorded in the JSON on the execution host.
 
 ## Publication gates still requiring the owner
 

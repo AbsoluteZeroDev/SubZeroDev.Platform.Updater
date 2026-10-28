@@ -76,7 +76,10 @@ function Test-InstalledUpdate([string]$Kind, [string]$Installer, [string]$Signin
         PreRepair = $null; PostRepair = $null; Observation = $null; Cleanup = $null
     } } else { $null }
     $operations = $null
-    if ($Repair) { $operations = $repairResult.InstallerOperations }
+    if ($Repair) {
+        $operations = $repairResult.InstallerOperations
+        $repairResult.Cleanup = $msiLifecycle # Retain partial cleanup evidence if a later assertion fails.
+    }
     try {
         if ($Repair -and $null -ne (Get-MsiInstalledVersion $productCode)) { throw 'Previous probe MSI is still registered; refusing to reuse it for repair.' }
         if ($Kind -eq 'Setup') {
@@ -165,7 +168,6 @@ function Test-InstalledUpdate([string]$Kind, [string]$Installer, [string]$Signin
                 $msiLifecycle.ResidualUninstallValues = $residue
                 $shortcuts = @(Get-ProbeShortcuts $appId)
                 $msiLifecycle.ResidualShortcuts = $shortcuts
-                if ($Repair) { $repairResult.Cleanup = $msiLifecycle }
                 $msiLifecycle | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $case 'msi-lifecycle.json')
                 if ($residue.Count -gt 0 -and ($residue.Count -ne 1 -or $residue[0] -ne 'DisplayVersion')) { throw "MSI uninstall left unexpected registry values: $($residue -join ', ')." }
                 if ($RequireCleanMsiUninstall -and $residue.Count -gt 0) { throw "MSI uninstall left the Velopack version key; a clean uninstall is required." }
