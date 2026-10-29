@@ -125,7 +125,9 @@ is explicitly **7 days**. The test-result artifact remains separate.
 Only these exact filenames are copied. No recursive smoke-tree upload is used. In particular,
 `control.json` (which includes `SigningKey`), signing material, package assets, installations,
 preferences, sentinel data and unrelated files are excluded. Symbolic links and junctions in
-source paths are rejected. Staging is reset before each distribution attempt; an existing smoke
+source paths are rejected. The ephemeral private signing key is removed from the environment
+after packaging, before verbose installer processes run; the caller's original environment is
+restored in the existing cleanup. Staging is reset before each distribution attempt; an existing smoke
 source is rejected rather than collected as fresh evidence.
 
 Collection runs even when the distribution probe throws. Missing files are expected on partial
