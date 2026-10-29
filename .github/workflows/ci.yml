@@ -12,10 +12,13 @@ jobs:
       contents: write
       packages: write
       id-token: write
-    uses: The-Running-Dev/GitHub-ActionTemplates/.github/workflows/dotnet.yml@v1
+    uses: The-Running-Dev/GitHub-ActionTemplates/.github/workflows/dotnet.yml@910a474b03ba57d1d716a28a12e345d8bd2a99ac # opt-in diagnostics; compatible v1 implementation
     with:
       os: '["windows-latest"]'
       dotnet-version: 10.0.x
       solution: SubZeroDev.Platform.Updater.slnx
       # Packs, restores the samples from the package, then checks portable, Setup, and MSI updates.
       post-build: scripts/Test-Distribution.ps1
+      diagnostic-artifact-paths: artifacts/probe-evidence/
+      diagnostic-artifact-name: updater-probe-evidence
+      retention-days: 7
