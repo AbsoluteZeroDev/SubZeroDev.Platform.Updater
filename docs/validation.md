@@ -104,9 +104,53 @@ These cover rollback/preservation expectations, inconsistent versions, stale obs
 or consent changes, registration loss, installer failures/reboot codes, and result persistence
 when installation and cleanup both fail. `Test-Distribution.ps1` runs them before packaging and
 runs all three installed cases through the existing Windows CI entry point.
-It also prints the repair JSON in the CI job log, including after failure; the shared workflow's
-artifact upload contains TRX results rather than installer output. Verbose MSI logs remain at
-the paths recorded in the JSON on the execution host.
+It also prints the repair JSON in the CI job log, including after failure.
+
+### CI diagnostic artifacts
+
+The distribution entry point now stages an allowlisted bundle under `artifacts/probe-evidence`
+in `finally`, including after a probe or packaging failure. CI and the NuGet workflow opt into
+the shared .NET workflow's separate `updater-probe-evidence-windows-latest` artifact. Retention
+is explicitly **7 days**. The test-result artifact remains separate.
+
+| Bundle path | Contents |
+|---|---|
+| `MSI/msi-lifecycle.json` | Normal MSI update/uninstall report, when produced. |
+| `MSI/msi-install.log`, `MSI/msi-uninstall.log` | Normal MSI verbose installer logs. |
+| `MSI-Repair/msi-repair.json` | Repair report, including partial failure and cleanup evidence from #20. |
+| `MSI-Repair/msi-install.log`, `MSI-Repair/msi-repair.log`, `MSI-Repair/msi-uninstall.log` | Repair case verbose installer logs, when each operation ran. |
+| `MSI-Repair/preserved data/repair-observation.json` | Fresh process observation, when produced. |
+| `bundle-manifest.json` | Collected relative paths and SHA-256 hashes, missing paths and collection failures. |
+
+Only these exact filenames are copied. No recursive smoke-tree upload is used. In particular,
+`control.json` (which includes `SigningKey`), signing material, package assets, installations,
+preferences, sentinel data and unrelated files are excluded. Symbolic links and junctions in
+source paths are rejected. The ephemeral private signing key is removed from the environment
+after packaging, before verbose installer processes run; the caller's original environment is
+restored in the existing cleanup. Staging is reset before each distribution attempt; an existing smoke
+source is rejected rather than collected as fresh evidence.
+
+Collection runs even when the distribution probe throws. Missing files are expected on partial
+runs and recorded in the manifest; available files are still retained. Collection errors fail an
+otherwise successful run, but are warnings alongside an existing probe failure so they cannot
+replace it. The shared upload runs after failure independently of TRX output, unless cancelled.
+Runner loss, cancellation or an upload-service failure can still prevent an artifact.
+
+```powershell
+pwsh -NoProfile -File tests/UpdaterProbe/Test-ProbeEvidence.ps1
+```
+
+These portable checks cover full/partial/early-failure collection, exclusion of control and
+package data, stale evidence, link rejection and primary/secondary failure handling. They do
+not run MSI or prove a GitHub upload. The prior characterization run
+[`40758208014`](https://github.com/The-Running-Dev/SubZeroDev.Platform.Updater/actions/runs/40758208014)
+uploaded only test results; this collection cannot recover that completed runner's unuploaded
+logs. A new CI artifact must be inspected separately before claiming an observed upload.
+
+The caller pins the full shared-template implementation commit, as permitted by its versioning
+rules, because the existing `v1` tag does not yet declare these new inputs. A future release may
+replace that pin once it contains them. This changes CI evidence only: production installers,
+the 1.2.161 Velopack pins, and rollback characterization expectations remain unchanged.
 
 ## Publication gates still requiring the owner
 

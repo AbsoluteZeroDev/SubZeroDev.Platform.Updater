@@ -198,6 +198,9 @@ try {
         & "$PSScriptRoot/Pack-Application.ps1" -Project tests/UpdaterProbe/UpdaterProbe.csproj -AppId $appId -MainExe UpdaterProbe.exe -Version $version -ReleaseNotes README.md -OutputDirectory $destination @packArguments
         if (-not (Get-ChildItem (Join-Path $destination 'assets') -Filter '*-full.nupkg.sig')) { throw "Release $version was not signed." }
     }
+    # Packaging is complete. Do not let verbose installer processes inherit the ephemeral
+    # private signing key now that their logs are retained as CI evidence.
+    $env:UPDATER_PACKAGE_SIGNING_KEY = $null
     $assets = Join-Path $baseline 'assets'
     $publicKey = $signer.ExportSubjectPublicKeyInfoPem()
     Test-InstalledUpdate 'Setup' (Get-ChildItem $assets -Filter '*-Setup.exe').FullName $publicKey
