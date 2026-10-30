@@ -1,9 +1,13 @@
 [CmdletBinding()]
-param([string]$OutputDirectory = 'artifacts/installer-smoke', [string]$NuGetConfig, [switch]$RequireCleanMsiUninstall)
+param(
+    [string]$OutputDirectory = 'artifacts/installer-smoke', [string]$NuGetConfig, [switch]$RequireCleanMsiUninstall,
+    [ValidateSet('CharacterizeRollback', 'PreserveUpdatedVersion')][string]$MsiRepairExpectation = 'CharacterizeRollback'
+)
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 if (-not $IsWindows -and $PSVersionTable.PSEdition -eq 'Core') { throw 'Installer smoke requires Windows.' }
 if (Test-Path -LiteralPath $OutputDirectory) { throw 'Use a fresh smoke output directory.' }
+. "$PSScriptRoot/MsiRepairProbe.ps1"
 
 $root = [IO.Path]::GetFullPath($OutputDirectory)
 $appId = 'SubZeroDev.UpdaterProbe.Smoke.' + [Guid]::NewGuid().ToString('N').Substring(0, 12)
@@ -13,16 +17,13 @@ $update = Join-Path $root '1.0.1'
 $previousControl = $env:UPDATER_PROBE_CONTROL
 $previousSigningKey = $env:UPDATER_PACKAGE_SIGNING_KEY
 $signer = [Security.Cryptography.ECDsa]::Create([Security.Cryptography.ECCurve+NamedCurves]::nistP256)
+$runtimePin = ([xml](Get-Content -LiteralPath "$PSScriptRoot/../Directory.Packages.props" -Raw)).Project.ItemGroup.PackageVersion.Where({ $_.Include -eq 'Velopack' }).Version
+$cliPin = (Get-Content -LiteralPath "$PSScriptRoot/../.config/dotnet-tools.json" -Raw | ConvertFrom-Json).tools.vpk.version
 
 function Wait-ForFile([string]$Path, [string]$Description) {
     $deadline = [DateTime]::UtcNow.AddSeconds(60)
     while (-not (Test-Path -LiteralPath $Path) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 250 }
     if (-not (Test-Path -LiteralPath $Path)) { throw "$Description was not created; inspect $root" }
-}
-
-function Invoke-Installer([string]$File, [string[]]$Arguments, [string]$Description) {
-    $process = Start-Process -FilePath $File -ArgumentList $Arguments -WindowStyle Hidden -Wait -PassThru
-    if ($process.ExitCode -ne 0) { throw "$Description failed with exit code $($process.ExitCode); inspect $root" }
 }
 
 function Get-MsiProductCode([string]$Path) {
@@ -48,8 +49,9 @@ function Get-ProbeShortcuts([string]$AppId) {
         Select-Object -ExpandProperty FullName -Unique)
 }
 
-function Test-InstalledUpdate([string]$Kind, [string]$Installer, [string]$SigningKey) {
-    $case = Join-Path $root $Kind
+function Test-InstalledUpdate([string]$Kind, [string]$Installer, [string]$SigningKey, [switch]$Repair) {
+    $caseName = if ($Repair) { 'MSI-Repair' } else { $Kind }
+    $case = Join-Path $root $caseName
     $data = Join-Path $case 'preserved data'
     $installation = Join-Path $case 'installation with spaces'
     New-Item -ItemType Directory -Path $data -Force | Out-Null
@@ -61,12 +63,31 @@ function Test-InstalledUpdate([string]$Kind, [string]$Installer, [string]$Signin
     $installed = $false
     $productCode = if ($Kind -eq 'MSI') { Get-MsiProductCode $Installer } else { $null }
     $msiLifecycle = if ($Kind -eq 'MSI') { [ordered]@{ ProductCode = $productCode; InitialInstallerVersion = '1.0.0'; UpdatedPackageVersion = '1.0.1' } } else { $null }
+    $repairResult = if ($Repair) { [ordered]@{
+        SchemaVersion = 1; AppId = $appId; ProductCode = $productCode; Installation = $installation; Data = $data
+        OriginalMsi = $Installer; OriginalMsiSha256 = (Get-FileHash -LiteralPath $Installer).Hash
+        VelopackRuntime = $runtimePin; VelopackCli = $cliPin
+        OS = [Runtime.InteropServices.RuntimeInformation]::OSDescription
+        ProcessArchitecture = [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString()
+        Expectation = $MsiRepairExpectation; Status = 'Failed'; Error = $null; CleanupError = $null
+        ExpectedPostRepairVersion = $(if ($MsiRepairExpectation -eq 'CharacterizeRollback') { '1.0.0' } else { '1.0.1' })
+        ObservationId = [Guid]::NewGuid().ToString('N'); RepairLog = (Join-Path $case 'msi-repair.log')
+        InstallerOperations = [Collections.Generic.List[object]]::new()
+        PreRepair = $null; PostRepair = $null; Observation = $null; Cleanup = $null
+    } } else { $null }
+    $operations = $null
+    if ($Repair) {
+        $operations = $repairResult.InstallerOperations
+        $repairResult.Cleanup = $msiLifecycle # Retain partial cleanup evidence if a later assertion fails.
+    }
     try {
+        if ($Repair -and $null -ne (Get-MsiInstalledVersion $productCode)) { throw 'Previous probe MSI is still registered; refusing to reuse it for repair.' }
         if ($Kind -eq 'Setup') {
             Invoke-Installer $Installer @('--silent', '--installto', "`"$installation`"") 'Setup installation'
         } else {
             $log = Join-Path $case 'msi-install.log'
-            Invoke-Installer 'msiexec.exe' @('/i', "`"$Installer`"", '/qn', '/norestart', "VELOPACK_INSTALLDIR=`"$installation`"", '/l*v', "`"$log`"") 'MSI installation'
+            $installed = $true # Also attempt scoped cleanup after a partial installation failure.
+            Invoke-Installer 'msiexec.exe' @('/i', "`"$Installer`"", '/qn', '/norestart', "VELOPACK_INSTALLDIR=`"$installation`"", '/l*v', "`"$log`"") 'MSI installation' $operations $log
         }
         $installed = $true
         $launcher = Join-Path $installation "$appId.exe"
@@ -114,15 +135,25 @@ function Test-InstalledUpdate([string]$Kind, [string]$Installer, [string]$Signin
                 Write-Warning "Windows Installer still registers $($msiLifecycle.UpdatedProductVersion) after the Velopack update to 1.0.1."
             }
         }
-        Write-Output "$Kind A -> B passed: $data"
+        if ($Repair) {
+            $repairResult.UpdateRuns = $runs
+            Wait-ProbeExit $installation
+            Invoke-MsiRepairProbe $repairResult $control $env:UPDATER_PROBE_CONTROL
+        }
+        Write-Output "$caseName A -> B validation completed: $data"
+    } catch {
+        if ($Repair) { $repairResult.Error = $_.Exception.Message }
+        throw
     } finally {
+      try {
         if ($installed) {
+            Wait-ProbeExit $installation
             if ($Kind -eq 'Setup') {
                 $uninstaller = Join-Path $installation 'Update.exe'
                 Invoke-Installer $uninstaller @('--silent', 'uninstall') 'Setup uninstall'
             } else {
                 $log = Join-Path $case 'msi-uninstall.log'
-                Invoke-Installer 'msiexec.exe' @('/x', "`"$Installer`"", '/qn', '/norestart', '/l*v', "`"$log`"") 'MSI uninstall'
+                Invoke-Installer 'msiexec.exe' @('/x', "`"$Installer`"", '/qn', '/norestart', '/l*v', "`"$log`"") 'MSI uninstall' $operations $log
                 $msiLifecycle.UninstalledProductVersion = Get-MsiInstalledVersion $productCode
                 if ($null -ne $msiLifecycle.UninstalledProductVersion) { throw "MSI uninstall left Windows Installer product $productCode registered." }
                 # Velopack 1.2.161 leaves its version-only HKCU key after msiexec removes an updated MSI.
@@ -144,6 +175,17 @@ function Test-InstalledUpdate([string]$Kind, [string]$Installer, [string]$Signin
             }
             if (Test-Path -LiteralPath $installation) { throw "$Kind uninstall left its installation directory: $installation" }
         }
+      } catch {
+        if (-not $Repair) { throw }
+        $repairResult.CleanupError = $_.Exception.Message
+        $repairResult.Status = 'Failed'
+        if (-not $repairResult.Error) { throw }
+      } finally {
+        if ($Repair) {
+            $repairResult.CompletedAtUtc = [DateTime]::UtcNow.ToString('o')
+            $repairResult | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $case 'msi-repair.json')
+        }
+      }
     }
 }
 
@@ -160,6 +202,8 @@ try {
     $publicKey = $signer.ExportSubjectPublicKeyInfoPem()
     Test-InstalledUpdate 'Setup' (Get-ChildItem $assets -Filter '*-Setup.exe').FullName $publicKey
     Test-InstalledUpdate 'MSI' (Get-ChildItem $assets -Filter '*.msi').FullName $publicKey
+    # Independent fresh install: retain the ordinary B -> uninstall path above.
+    Test-InstalledUpdate 'MSI' (Get-ChildItem $assets -Filter '*.msi').FullName $publicKey -Repair
 } finally {
     $env:UPDATER_PROBE_CONTROL = $previousControl
     $env:UPDATER_PACKAGE_SIGNING_KEY = $previousSigningKey

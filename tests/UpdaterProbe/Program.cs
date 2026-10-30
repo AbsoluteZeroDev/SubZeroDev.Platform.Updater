@@ -8,7 +8,9 @@ internal static class Program
 {
 private static void Main()
 {
-    VelopackApp.Build().Run();
+    // Test fixture: never let cached packages hide a repair rollback before we observe it.
+    // Updates in the normal smoke path are explicitly applied by InstallAsync below.
+    VelopackApp.Build().SetAutoApplyOnStartup(false).Run();
     RunAsync().GetAwaiter().GetResult();
 }
 private static async Task RunAsync()
@@ -22,6 +24,19 @@ string version = locator.CurrentlyInstalledVersion?.ToString() ?? "unpackaged";
 // The compiled version proves the relaunched binary was replaced, not only the package metadata.
 string binary = typeof(Program).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion.Split('+')[0] ?? "unknown";
 File.AppendAllText(Path.Combine(control.Data, "runs.log"), $"{version}|{binary}|{Environment.ProcessPath}|{locator.RootAppDir}{Environment.NewLine}");
+if (control.ObserveOnly) {
+    if (!Guid.TryParseExact(control.ObservationId, "N", out _)) throw new InvalidOperationException("Missing observation nonce.");
+    // Return before creating an updater client, verifying pending installs, or checking any feed.
+    string observation = Path.Combine(control.Data, "repair-observation.json");
+    string temporary = observation + ".tmp";
+    File.WriteAllText(temporary, JsonSerializer.Serialize(new {
+        control.ObservationId, Mode = "ObserveOnly", PackageVersion = version, BinaryVersion = binary,
+        ExecutablePath = Environment.ProcessPath, InstallationRoot = locator.RootAppDir,
+        ProcessId = Environment.ProcessId, ObservedAtUtc = DateTimeOffset.UtcNow
+    }));
+    File.Move(temporary, observation, overwrite: true);
+    return;
+}
 var options = new UpdaterOptions(control.AppId, new(control.Repository), control.Data) { NetworkTimeout = TimeSpan.FromMinutes(5), PackageSigningKey = control.SigningKey };
 var restart = new Restart();
 await using var client = control.Feed is null
@@ -38,7 +53,8 @@ await client.InstallAsync(candidate, rememberAutomaticConsent: true);
 }
 }
 
-record Control(string AppId, string Repository, string Data, string Target, string? Feed, string? SigningKey);
+record Control(string AppId, string Repository, string Data, string Target, string? Feed, string? SigningKey,
+    bool ObserveOnly = false, string? ObservationId = null);
 sealed class Restart : IUpdateRestartCoordinator
 {
     public Task<RestartDecision> RequestRestartAsync(CancellationToken cancellationToken) => Task.FromResult(RestartDecision.Ready);

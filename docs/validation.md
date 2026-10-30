@@ -2,6 +2,7 @@
 
 Validated with .NET 10, Velopack runtime/CLI 1.2.161, Windows x64. MSI lifecycle was revalidated on 2026-10-27. Artifacts are unsigned.
 Local evidence is retained under ignored `artifacts/`; CI repeats deterministic, portable, Setup, and MSI gates.
+The original-MSI repair automation described below was added after the October 27 manual reproduction. Its implementation and portable checks are separate from completed Windows repair executions.
 
 | Gate | Evidence |
 |---|---|
@@ -11,6 +12,7 @@ Local evidence is retained under ignored `artifacts/`; CI repeats deterministic,
 | Setup | `scripts/Test-InstalledUpdate.ps1` runs a silent per-user Setup A→B update in a path with spaces. It verifies the relaunched binary, pinned publisher signature, preserved external data and consent, and uninstall cleanup. CI repeats this gate. The earlier manual A→B→C run is retained as local evidence under `setup-data`. |
 | MSI | The same script runs a per-user MSI A→B update without elevation and verifies the relaunched binary, pinned publisher signature, preserved data, Windows Installer product version, custom HKCU uninstall version, shortcut cleanup, and product unregistration. CI repeats this gate. `MSI/msi-lifecycle.json` records the observed versions and residual key values. On Velopack 1.2.161, Windows Installer reported 1.0.0.0 after the app reached 1.0.1, and `msiexec /x` left a `DisplayVersion`-only HKCU key; the script removes only its uniquely named smoke-test key. A separate local `msiexec /fa` probe with the original MSI restored `current/sq.version` from 1.0.1 to 1.0.0. The cleanup fix is merged upstream but not in this pinned release; use `-RequireCleanMsiUninstall` when testing a newer Velopack. Evidence: `artifacts/msi-lifecycle-local-3`. The earlier manual run is retained under `msi-data`. |
 | Public GitHub | Public probe v1.0.1 contains ZIP, Setup, MSI, full nupkg, feed, SHA256SUMS and notes. Packaged A checked/downloaded/verified/applied/relaunched B through the production unauthenticated GitHub source. Evidence: github-data. |
+| MSI original-package repair | `Test-InstalledUpdate.ps1` now also runs an independent fresh MSI A→B→original-MSI repair→uninstall case, after the ordinary B→uninstall case. It writes `MSI-Repair/msi-repair.json` and verbose installer logs. The default characterizes the known rollback on 1.2.161; `-MsiRepairExpectation PreserveUpdatedVersion` instead requires B to survive. Adding the gate does not constitute a new Windows repair execution; see commands and evidence contract below. |
 | HotCorners | Actual packaged 1.1.0→1.1.1 local-feed update completed; `current/sq.version` became 1.1.1 and a new app process ran from the same stable root. Isolated updater preferences and preservation sentinel survived. Smoke-only build enables the local feed and isolated settings; production builds exclude those hooks. |
 | HotCorners regression | 214 tests pass: 66 Core, 74 Platform, 74 App. Includes startup migration/quoting, native menu checked/radio/busy states, and safe restart waiting for an occupied action slot. |
 
@@ -32,6 +34,79 @@ Uninstall the same AppId's Setup before installing MSI. Preserve test evidence o
 Sample runtime checks: set UPDATER_SAMPLE_SMOKE to an absolute result-file path, run either
 built sample EXE and wait for its normal exit. The UI dispatcher runs the manual check and
 writes its outcome. Clear that variable for interactive use.
+
+### Original-MSI repair characterization
+
+From the repository root on Windows x64 with PowerShell 7 and .NET 10, run:
+
+```powershell
+pwsh -NoProfile -File scripts/Test-InstalledUpdate.ps1 -OutputDirectory artifacts/msi-repair-characterization -MsiRepairExpectation CharacterizeRollback
+```
+
+Use a fresh output directory each time. The script builds the existing isolated, randomly named
+`SubZeroDev.UpdaterProbe.Smoke.*` application and signed A=1.0.0 / B=1.0.1 packages with the
+unchanged runtime/CLI 1.2.161 pins. It first runs the ordinary Setup and MSI update/uninstall
+cases. It then reinstalls the same probe's original A MSI in a separate `MSI-Repair` installation,
+applies the signed B update, waits for the probe processes to exit, and invokes:
+
+```powershell
+msiexec.exe /fa "<original-1.0.0.msi>" /qn /norestart /l*v "<output>/MSI-Repair/msi-repair.log"
+```
+
+Before repair, control is switched to `ObserveOnly` with no feed and a fresh observation nonce.
+The old `complete` and repair observation files are removed. After repair, the script snapshots
+the files on disk and launches `current/UpdaterProbe.exe` directly. The probe disables Velopack
+startup auto-apply and returns before constructing an updater client in observation mode, so
+neither a cached package nor another update check can hide the repaired payload. The new process
+must exit successfully and report the expected nonce, process ID, executable path, installation
+root, package version, and compiled version. The earlier A→B completion marker is never accepted
+as repair evidence.
+
+`<output>/MSI-Repair/msi-repair.json` records:
+
+| Evidence | Fields |
+|---|---|
+| Identity and expectation | Probe AppId, ProductCode, isolated installation/data paths, original MSI path and SHA-256, runtime/CLI pins, OS/architecture, expectation and expected version. |
+| Before and after repair | `PreRepair` / `PostRepair`: `sq.version` package version and hash, executable product/file versions and hash, Windows Installer product state/version, and custom HKCU uninstall key values. |
+| Installer outcome | `InstallerOperations`: exact argument arrays, start/end timestamps, exit codes/errors, and verbose install/repair/uninstall log paths and existence. Only exit 0 passes; reboot-required codes remain visible and fail immediate validation. |
+| Process observation | `ObservationId`, launched process ID/exit code, and `Observation` from the repaired binary, independent of `complete`. |
+| External preservation | Pre/post SHA-256 hashes for config, diagnostics, and updater preferences; persisted automatic consent and no pending install. The observation must leave all three files byte-for-byte unchanged. |
+| Cleanup and failures | Product unregistration, shortcut and key residue evidence, primary error and separate cleanup error. The result is written in `finally`, including after repair or cleanup failure. |
+
+On the pinned version, `CharacterizeRollback` expects package **and executable** 1.0.0 after
+repair, with Windows Installer still registering 1.0.0.0 before and after. Its passing status is
+`KnownLimitationReproduced`: it establishes the limitation, **not repair safety or an upstream
+fix**. An unexpected result fails and retains the evidence rather than being silently accepted.
+The October 27 manual execution established the `sq.version` rollback; the new gate additionally
+requires the executable and fresh process evidence.
+
+For a future fix, explicitly require preservation of B (this task does not upgrade Velopack):
+
+```powershell
+pwsh -NoProfile -File scripts/Test-InstalledUpdate.ps1 -OutputDirectory artifacts/msi-repair-preserved -MsiRepairExpectation PreserveUpdatedVersion
+```
+
+This expectation fails on a rollback and reports `UpdatedVersionPreserved` only when both package
+and executable remain 1.0.1, the fresh process agrees, registration remains present, and external
+data/consent survive. MSI inventory versions are still recorded; payload preservation alone does
+not establish that inventory reconciliation or every repair behavior is fixed.
+`-RequireCleanMsiUninstall` is an independent assertion for the separate upstream uninstall-key
+cleanup fix and can be combined with either command. Cleanup uses only the generated probe MSI,
+its exact uninstall key, and its isolated paths; it never repairs a production application.
+
+Portable evidence-contract checks (mocked OS boundaries, no MSI execution):
+
+```powershell
+pwsh -NoProfile -File tests/UpdaterProbe/Test-MsiRepairEvidence.ps1
+```
+
+These cover rollback/preservation expectations, inconsistent versions, stale observations, data
+or consent changes, registration loss, installer failures/reboot codes, and result persistence
+when installation and cleanup both fail. `Test-Distribution.ps1` runs them before packaging and
+runs all three installed cases through the existing Windows CI entry point.
+It also prints the repair JSON in the CI job log, including after failure; the shared workflow's
+artifact upload contains TRX results rather than installer output. Verbose MSI logs remain at
+the paths recorded in the JSON on the execution host.
 
 ## Publication gates still requiring the owner
 
