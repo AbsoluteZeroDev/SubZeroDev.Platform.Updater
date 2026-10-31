@@ -8,7 +8,7 @@
     <IsPackable>false</IsPackable>
     <Version>0.1.0</Version>
     <Authors>SubZeroDev</Authors>
-    <RepositoryUrl>https://github.com/The-Running-Dev/SubZeroDev.Platform.Updater</RepositoryUrl>
+    <RepositoryUrl>https://github.com/AbsoluteZeroDev/SubZeroDev.Platform.Updater</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
   </PropertyGroup>
